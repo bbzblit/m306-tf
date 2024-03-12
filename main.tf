@@ -15,24 +15,31 @@ provider "aws" {
 }
 
 
-resource "aws_key_pair" "deplpoyment_key" {
+data "aws_key_pair" "deplpoyment_key" {
   key_name   = "deployer-key"
-  public_key = var.ssh_key
 }
 
+data "aws_availability_zones" "available" {}
 
 resource "aws_instance" "webapp" {
   ami           = "ami-058bd2d568351da34"
   instance_type = "t2.micro"
-  key_name = aws_key_pair.deplpoyment_key.key_name
-  
-  security_groups = [
+  associate_public_ip_address = true
+  key_name = data.aws_key_pair.deplpoyment_key.key_name
+  subnet_id = aws_subnet.app_net[0].id
+  availability_zone = data.aws_availability_zones.available.names[0]
+  vpc_security_group_ids = [
     aws_security_group.app_sg.id
   ]
 
   tags = {
     Name = "webapp"
   }
+}
+
+resource "aws_db_subnet_group" "db_subnet_group" {
+  name       = "db_subnet_group"
+  subnet_ids = [for subnet in aws_subnet.db_net : subnet.id]
 }
 
 resource "aws_db_instance" "appdb" {
@@ -43,99 +50,82 @@ resource "aws_db_instance" "appdb" {
   username = "oursql_app_user"
   password = var.db_password
   instance_class = "db.t3.micro"
-
+  skip_final_snapshot = true
+  db_subnet_group_name = aws_db_subnet_group.db_subnet_group.name
   vpc_security_group_ids = [
     aws_security_group.db_sg.id
   ]
 }
 
-resource "aws_default_vpc" "default" {
+resource "aws_vpc" "default" {
+  cidr_block = "10.0.0.0/16"
   tags = {
     Name = "Default VPC"
   }
 }
 
 resource "aws_subnet" "app_net" {
-  vpc_id     = aws_default_vpc.default.id
-  cidr_block = "10.0.1.0/24"
-
+  vpc_id     = aws_vpc.default.id
+  cidr_block = "10.0.${10+count.index}.0/24"  
+  availability_zone = "${data.aws_availability_zones.available.names[count.index]}"
+  count = "${length(data.aws_availability_zones.available.names)}"
   tags = {
-    Name = "AppNet"
+    Name = "app_net"
   }
 }
-resource "aws_subnet" "db_net" {
-  vpc_id     = aws_default_vpc.default.id
-  cidr_block = "10.0.2.0/24"
 
+
+resource "aws_subnet" "db_net" {
+  vpc_id     = aws_vpc.default.id
+  cidr_block = "10.0.${20+count.index}.0/24"  
+  availability_zone = "${data.aws_availability_zones.available.names[count.index]}"
+  count = "${length(data.aws_availability_zones.available.names)}"
   tags = {
-    Name = "DBNet"
+    Name = "db_net"
   }
 }
 
 resource "aws_network_acl" "db_acl" {
-  vpc_id = aws_default_vpc.default.id
-  egress = [{
-    from_port   = 0
-    to_port     = 0
+  vpc_id = aws_vpc.default.id
+  
+  egress {
+    from_port = 0
+    to_port = 0
     action = "allow"
     rule_no = 100
     protocol = -1
-
-    ipv6_cidr_block = null
-    icmp_code = null
-    icmp_type = null
-    cidr_block = null
-  }]
-
-  ingress = [ {
-    from_port   = 0
-    to_port     = 0
-    action = "allow"
-    rule_no = 100
-    cidr_block  = "10.0.1.0/24"
-    protocol = -1
-
-    ipv6_cidr_block = null
-    icmp_code = null
-    icmp_type = null
-  }]
+    cidr_block = "0.0.0.0/0"
+  }
 
   subnet_ids = [
-    aws_subnet.db_net.id
+    for subnet in aws_subnet.db_net : subnet.id
   ]
 }
 
 
 resource "aws_network_acl" "app_acl" {
-  vpc_id = aws_default_vpc.default.id
-  egress = [{
-    from_port   = 0
-    to_port     = 0
+  vpc_id = aws_vpc.default.id
+  
+  egress {
+    from_port = 0
+    to_port = 0
     action = "allow"
     rule_no = 100
     protocol = -1
+    cidr_block = "0.0.0.0/0"
+  }
 
-    cidr_block = null
-    icmp_code = null
-    icmp_type = null
-    ipv6_cidr_block = null 
-  }]
-
-  ingress = [{
+  ingress {
     from_port   = 80
     to_port     = 80
     protocol    = "tcp"
     action  = "allow"
     rule_no = 100
-    
-    cidr_block = null
-    icmp_code = null
-    icmp_type = null
-    ipv6_cidr_block = null 
-  }]
+    cidr_block = "0.0.0.0/0"
+  }
 
   subnet_ids = [
-    aws_subnet.app_net.id
+    for subnet in aws_subnet.app_net : subnet.id
   ]  
 }
 
@@ -143,54 +133,21 @@ resource "aws_network_acl" "app_acl" {
 resource "aws_security_group" "db_sg" {
   name = "db-sg"
   description = "Security group for the App DB"
-  vpc_id = aws_default_vpc.default.id
-
-
-  ingress = [{
-    from_port = 0
-    to_port = 3306
-    protocol = "tcp"
-    cidr_blocks = ["10.0.1.0/24"]
-    description = "Allow access to db from appnet"
-
-    ipv6_cidr_blocks = []
-    prefix_list_ids = []
-    security_groups = []
-    self = false
-  }]
+  vpc_id = aws_vpc.default.id
 }
 
+
+resource "aws_security_group_rule" "db_allow_all_app_traffic" {
+  type = "ingress"
+  from_port = 0
+  to_port = 3306
+  protocol = "tcp"
+  cidr_blocks = [for subnet in aws_subnet.app_net : subnet.cidr_block]
+  security_group_id = aws_security_group.db_sg.id
+}
 
 resource "aws_security_group" "app_sg" {
   name = "app-sg"
   description = "Security group for the App"
-  vpc_id = aws_default_vpc.default.id
-
-  ingress = [
-    {
-      from_port = 0
-      to_port = 80
-      protocol = "tcp"
-      cidr_blocks = []
-      ipv6_cidr_blocks = []
-      prefix_list_ids = []
-      security_groups = []
-      self = false
-      description = "Allo http traffic"
-    }
-  ]
-}
-
-
-resource "aws_lb" "app_alb" {
-  name = "app-alb"
-  internal = false
-  load_balancer_type = "application"
-  subnets = [
-    aws_subnet.app_net.id 
-  ]
-
-  tags = {
-    Environment = "production"
-  }
+  vpc_id = aws_vpc.default.id
 }
