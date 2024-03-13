@@ -21,6 +21,24 @@ data "aws_key_pair" "deplpoyment_key" {
 
 data "aws_availability_zones" "available" {}
 
+resource "aws_internet_gateway" "ig" {
+  vpc_id = aws_vpc.default.id
+}
+
+resource "aws_route_table" "nat_gateway" {
+  vpc_id = aws_vpc.default.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.ig.id
+  }
+}
+
+resource "aws_route_table_association" "nat_gateway" {
+  subnet_id = aws_subnet.app_net[count.index].id
+  count = "${length(data.aws_availability_zones.available.names)}"
+  route_table_id = aws_route_table.nat_gateway.id
+}
+
 resource "aws_instance" "webapp" {
   ami           = "ami-058bd2d568351da34"
   instance_type = "t2.micro"
@@ -72,6 +90,8 @@ resource "aws_subnet" "app_net" {
   tags = {
     Name = "app_net"
   }
+
+  map_public_ip_on_launch = true
 }
 
 
@@ -116,12 +136,12 @@ resource "aws_network_acl" "app_acl" {
   }
 
   ingress {
-    from_port   = 80
-    to_port     = 80
+    from_port   = 22
+    to_port     = 22
     protocol    = "tcp"
     action  = "allow"
-    rule_no = 100
-    cidr_block = "0.0.0.0/0"
+    rule_no = 101
+    cidr_block = "5.161.212.161/32"
   }
 
   subnet_ids = [
@@ -139,7 +159,7 @@ resource "aws_security_group" "db_sg" {
 
 resource "aws_security_group_rule" "db_allow_all_app_traffic" {
   type = "ingress"
-  from_port = 0
+  from_port = 3306
   to_port = 3306
   protocol = "tcp"
   cidr_blocks = [for subnet in aws_subnet.app_net : subnet.cidr_block]
@@ -150,4 +170,13 @@ resource "aws_security_group" "app_sg" {
   name = "app-sg"
   description = "Security group for the App"
   vpc_id = aws_vpc.default.id
+}
+
+resource "aws_security_group_rule" "app_allow_ssh" {
+  type = "ingress"
+  from_port = 22
+  to_port = 22
+  protocol = "tcp"
+  cidr_blocks = ["5.161.212.161/32"] // Subnet 255.255.255.255 -> only one IP
+  security_group_id = aws_security_group.app_sg.id
 }
