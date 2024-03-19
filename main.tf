@@ -25,22 +25,23 @@ resource "aws_internet_gateway" "ig" {
   vpc_id = aws_vpc.default.id
 }
 
-resource "aws_route_table" "nat_gateway" {
+resource "aws_route_table" "app_net_route_table" {
   vpc_id = aws_vpc.default.id
   route {
     cidr_block = "0.0.0.0/0"
     gateway_id = aws_internet_gateway.ig.id
-  }
+  } 
 }
 
-resource "aws_route_table_association" "nat_gateway" {
+
+resource "aws_route_table_association" "app_net_route_table_association" {
   subnet_id = aws_subnet.app_net[count.index].id
   count = "${length(data.aws_availability_zones.available.names)}"
-  route_table_id = aws_route_table.nat_gateway.id
+  route_table_id = aws_route_table.app_net_route_table.id
 }
 
 resource "aws_instance" "webapp" {
-  ami           = "ami-058bd2d568351da34"
+  ami           = "ami-058bd2d568351da34" // Debian 12
   instance_type = "t2.micro"
   associate_public_ip_address = true
   key_name = data.aws_key_pair.deplpoyment_key.key_name
@@ -56,7 +57,7 @@ resource "aws_instance" "webapp" {
 }
 
 resource "aws_db_subnet_group" "db_subnet_group" {
-  name       = "db_subnet_group"
+  name       = "db_subnet"
   subnet_ids = [for subnet in aws_subnet.db_net : subnet.id]
 }
 
@@ -78,26 +79,32 @@ resource "aws_db_instance" "appdb" {
 resource "aws_vpc" "default" {
   cidr_block = "10.0.0.0/16"
   tags = {
-    Name = "Default VPC"
+    Name = "M306 VPC"
   }
+
+  enable_dns_hostnames = true
+  enable_dns_support = true
 }
+
+
 
 resource "aws_subnet" "app_net" {
   vpc_id     = aws_vpc.default.id
-  cidr_block = "10.0.${10+count.index}.0/24"  
+  cidr_block = "10.0.${count.index}.0/24"  
   availability_zone = "${data.aws_availability_zones.available.names[count.index]}"
   count = "${length(data.aws_availability_zones.available.names)}"
   tags = {
     Name = "app_net"
   }
-
+  
   map_public_ip_on_launch = true
+  
 }
 
 
 resource "aws_subnet" "db_net" {
   vpc_id     = aws_vpc.default.id
-  cidr_block = "10.0.${20+count.index}.0/24"  
+  cidr_block = "10.0.${128+count.index}.0/24"  
   availability_zone = "${data.aws_availability_zones.available.names[count.index]}"
   count = "${length(data.aws_availability_zones.available.names)}"
   tags = {
@@ -114,7 +121,16 @@ resource "aws_network_acl" "db_acl" {
     action = "allow"
     rule_no = 100
     protocol = -1
-    cidr_block = "0.0.0.0/0"
+    cidr_block = aws_subnet.app_net[0].cidr_block
+  }
+
+  ingress {
+    from_port   = 3306
+    to_port     = 3306
+    protocol    = "tcp"
+    action  = "allow"
+    rule_no = 100
+    cidr_block = aws_subnet.app_net[0].cidr_block
   }
 
   subnet_ids = [
@@ -136,12 +152,12 @@ resource "aws_network_acl" "app_acl" {
   }
 
   ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
+    from_port   = 0
+    to_port     = 0
+    protocol    = -1
     action  = "allow"
-    rule_no = 101
-    cidr_block = "5.161.212.161/32"
+    rule_no = 100
+    cidr_block = "0.0.0.0/0"
   }
 
   subnet_ids = [
@@ -154,6 +170,13 @@ resource "aws_security_group" "db_sg" {
   name = "db-sg"
   description = "Security group for the App DB"
   vpc_id = aws_vpc.default.id
+
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = "-1"
+    cidr_blocks = ["10.0.0.0/16"]
+  }
 }
 
 
@@ -170,6 +193,27 @@ resource "aws_security_group" "app_sg" {
   name = "app-sg"
   description = "Security group for the App"
   vpc_id = aws_vpc.default.id
+
+  egress {
+    from_port = 0
+    to_port = 0
+    protocol = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 80
+    to_port     = 80
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    from_port   = 443
+    to_port     = 443
+    protocol    = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
 }
 
 resource "aws_security_group_rule" "app_allow_ssh" {
